@@ -1,0 +1,3 @@
+from modules.giveaway.cog import GiveawayCog, setup
+
+__all__ = ["GiveawayCog", "setup"]
