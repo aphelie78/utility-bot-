@@ -1,1 +1,657 @@
+from typing import Optional
+import io
+import random
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+from modules.giveaway.service import GiveawayService, parse_duration
+
+# Custom Emoji Constants
+EMOJI_PARTY_CAT = "<a:giveaway:1569428727094444184>"
+EMOJI_ARROW = "<a:Arrow_White:1569431494751953020>"
+EMOJI_BUTTERFLY = "<:dot_butterfully:1569431570601873439>"
+EMOJI_CHADYOGI = "<:chadyogi:1569432959512223815>"
+EMOJI_FEATHER = "<:Dil_Morpankh:1569431034095865866>"
+EMOJI_ROCKET = "<a:GIFCryptoRocket:1569428032572235819>"
+EMOJI_HEART = "<a:envelopeheart:1569428120019406918>"
+EMOJI_TIMER = "<a:timer_1278307360774951013:1569427752946499636>"
+EMOJI_FLASH = "<a:Flashh:1569427838036344873>"
+EMOJI_CAT = "<:Cat_Blep:1569427923205755082>"
+EMOJI_SKULL = "<a:skull_lines:1569428206057164952>"
+EMOJI_CONFUSE = "<:shido_confuse:1569428297698377749>"
+EMOJI_MUTHAL = "<a:muthal:1569428597410758696>"
+
+# 10 Funny & casual winner announcement templates
+WINNER_ANNOUNCEMENT_TEMPLATES = [
+    # 1
+    (
+        f"{EMOJI_PARTY_CAT} **AYOOOO {{users}}!!**\n\n"
+        f"Bro really entered the giveaway and walked away with **{{prize}}** {EMOJI_ROCKET}. Meanwhile, we're just professional participants {EMOJI_CONFUSE}.\n\n"
+        f"GGs! Hosted by {{host}} {EMOJI_FEATHER}"
+    ),
+    # 2
+    (
+        f"{EMOJI_SKULL} **THE RNG HAS SPOKEN!**\n\n"
+        f"Congratulations {{users}}! You've won **{{prize}}** {EMOJI_FLASH} while the rest of us won emotional damage {EMOJI_MUTHAL}.\n\n"
+        f"Thanks to {{host}} for hosting! {EMOJI_HEART}"
+    ),
+    # 3
+    (
+        f"{EMOJI_FLASH} **LUCKY HUMAN DETECTED!**\n\n"
+        f"{{users}} has successfully defeated the odds and secured **{{prize}}** {EMOJI_ROCKET}.\n\n"
+        f"Bro's luck is NOT normal {EMOJI_SKULL}."
+    ),
+    # 4
+    (
+        f"{EMOJI_TIMER} **BREAKING NEWS** {EMOJI_TIMER}\n\n"
+        f"{{users}} has officially become richer by **{{prize}}** {EMOJI_ROCKET}.\n\n"
+        f"More updates on how the rest of us remain broke {EMOJI_CONFUSE}."
+    ),
+    # 5
+    (
+        f"{EMOJI_CAT} **WINNER WINNER!**\n\n"
+        f"Congratulations {{users}}! Bro came for free stuff and actually got it {EMOJI_PARTY_CAT}.\n\n"
+        f"Enjoy your **{{prize}}**! {EMOJI_FEATHER}"
+    ),
+    # 6
+    (
+        f"{EMOJI_ROCKET} **THE BAG HAS BEEN SECURED!**\n\n"
+        f"Congratulations {{users}}! Your one lucky click just paid off {EMOJI_FLASH}.\n\n"
+        f"**Prize:** {{prize}} • **Host:** {{host}}\n\n"
+        f"Rest of us? Skill issue {EMOJI_SKULL}."
+    ),
+    # 7
+    (
+        f"{EMOJI_CONFUSE} **EVERYONE HAD A DREAM...**\n\n"
+        f"But only {{users}} had the RNG on their side {EMOJI_FLASH}!\n\n"
+        f"Congratulations on winning **{{prize}}** {EMOJI_ROCKET}. Don't forget us when you're famous {EMOJI_SKULL}."
+    ),
+    # 8
+    (
+        f"{EMOJI_PARTY_CAT} **JACKPOTTT!**\n\n"
+        f"The giveaway gods have chosen their favourite child {EMOJI_HEART}.\n\n"
+        f"Congratulations {{users}} on winning **{{prize}}**! {EMOJI_FEATHER}"
+    ),
+    # 9
+    (
+        f"{EMOJI_CAT} **BRO REALLY SAID EZ!**\n\n"
+        f"{{users}} casually collected **{{prize}}** {EMOJI_ROCKET} while everyone else collected absolutely nothing {EMOJI_MUTHAL}.\n\n"
+        f"GG WP! {EMOJI_FLASH}"
+    ),
+    # 10
+    (
+        f"{EMOJI_FLASH} **MAIN CHARACTER MOMENT!**\n\n"
+        f"Congratulations {{users}}! Today the universe decided to stop ignoring you and reward you with **{{prize}}** {EMOJI_ROCKET}.\n\n"
+        f"Enjoy the W! {EMOJI_HEART}\n"
+        f"Hosted by {{host}} {EMOJI_FEATHER}"
+    ),
+]
+
+
+def build_giveaway_embed(
+    guild_name: str,
+    prize: str,
+    winners: int,
+    host_mention: str,
+    end_timestamp: int,
+    image_url: Optional[str] = None,
+) -> discord.Embed:
+    winner_str = f"**{winners}**" if winners > 1 else "**1**"
+    upper_name = guild_name.upper()
+    desc = (
+        f"{EMOJI_PARTY_CAT} **{upper_name} PRESENT GIVEAWAY** {EMOJI_PARTY_CAT}\n\n"
+        f"{EMOJI_ARROW} **prize -** **{prize}**\n\n"
+        f"{EMOJI_BUTTERFLY} **winner -** {winner_str}\n"
+        f"{EMOJI_BUTTERFLY} **hosted by -** {host_mention}\n"
+        f"{EMOJI_BUTTERFLY} **ends -** <t:{end_timestamp}:R> (<t:{end_timestamp}:f>)\n\n"
+        f"{EMOJI_ARROW} **react on the YOGI JI** {EMOJI_CHADYOGI} **to enter the giveaway**\n\n"
+        f"good luck to everyone entering {EMOJI_FEATHER}"
+    )
+    embed = discord.Embed(
+        description=desc,
+        colour=discord.Colour.from_rgb(47, 49, 54),
+    )
+    if image_url:
+        embed.set_image(url=image_url)
+    return embed
+
+
+def build_giveaway_ended_embed(
+    guild_name: str,
+    prize: str,
+    winners_mentions: str,
+    host_mention: str,
+    image_url: Optional[str] = None,
+) -> discord.Embed:
+    upper_name = guild_name.upper()
+    desc = (
+        f"{EMOJI_PARTY_CAT} **{upper_name} GIVEAWAY ENDED** {EMOJI_PARTY_CAT}\n\n"
+        f"{EMOJI_ARROW} **prize -** **{prize}**\n\n"
+        f"{EMOJI_BUTTERFLY} **winner -** {winners_mentions}\n"
+        f"{EMOJI_BUTTERFLY} **hosted by -** {host_mention}\n\n"
+        f"{EMOJI_ARROW} **Congratulations to the winner(s)!** {EMOJI_FEATHER}"
+    )
+    embed = discord.Embed(
+        description=desc,
+        colour=discord.Colour.dark_grey(),
+    )
+    if image_url:
+        embed.set_image(url=image_url)
+    return embed
+
+
+class GiveawayCog(commands.Cog, name="Giveaway"):
+    """Giveaway system with custom styled templates, image/GIF banners, and automated timer ending."""
+
+    giveaway_slash = app_commands.Group(
+        name="giveaway",
+        description="Host and manage server giveaways",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self.service = GiveawayService(bot)
+        # Track recent announcement template indices per guild to prevent repetition within 4 draws
+        self._recent_templates: dict[int, list[int]] = {}
+
+    def get_winner_announcement(self, guild_id: int, users: str, prize: str, host: str) -> str:
+        recent = self._recent_templates.setdefault(guild_id, [])
+        all_indices = list(range(len(WINNER_ANNOUNCEMENT_TEMPLATES)))
+        # Filter out templates used in the last 4 announcements
+        allowed = [i for i in all_indices if i not in recent[-4:]]
+        if not allowed:
+            allowed = all_indices
+
+        chosen_idx = random.choice(allowed)
+        recent.append(chosen_idx)
+        # Keep list memory manageable
+        if len(recent) > 20:
+            self._recent_templates[guild_id] = recent[-10:]
+
+        template = WINNER_ANNOUNCEMENT_TEMPLATES[chosen_idx]
+        return template.format(users=users, prize=prize, host=host)
+
+    async def cog_load(self) -> None:
+        await self.service.init_db()
+        self.giveaway_check_loop.start()
+
+    async def cog_unload(self) -> None:
+        self.giveaway_check_loop.cancel()
+
+    @tasks.loop(seconds=10)
+    async def giveaway_check_loop(self) -> None:
+        """Periodic loop to end giveaways whose time has elapsed."""
+        due = await self.service.get_due_giveaways()
+        for gw in due:
+            await self._finalize_giveaway(gw["message_id"])
+
+    async def _finalize_giveaway(self, message_id: int) -> None:
+        channel_row = await self.service.get_giveaway(message_id)
+        if not channel_row:
+            return
+
+        channel = self.bot.get_channel(channel_row["channel_id"])
+        if channel:
+            try:
+                msg = await channel.fetch_message(message_id)
+                # Sync reactors as fallback to ensure 100% of participants are entered
+                for reaction in msg.reactions:
+                    if (isinstance(reaction.emoji, discord.Emoji) and reaction.emoji.id == 1569432959512223815) or str(reaction.emoji) in ("🎉", "🎁"):
+                        async for u in reaction.users():
+                            if not u.bot:
+                                await self.service.add_entry(message_id, u.id)
+            except discord.HTTPException:
+                msg = None
+        else:
+            msg = None
+
+        res = await self.service.end_giveaway(message_id)
+        if not res:
+            return
+        gw, winners = res
+
+        if not channel:
+            return
+
+        guild_name = channel.guild.name if channel.guild else "SERVER"
+        img_url = gw.get("image_url")
+
+        if winners:
+            winners_mentions = ", ".join(f"<@{uid}>" for uid in winners)
+            embed = build_giveaway_ended_embed(guild_name, gw["prize"], winners_mentions, f"<@{gw['host_id']}>", image_url=img_url)
+            announcement_text = self.get_winner_announcement(
+                channel.guild.id,
+                users=winners_mentions,
+                prize=gw["prize"],
+                host=f"<@{gw['host_id']}>",
+            )
+            announcement_embed = discord.Embed(
+                description=announcement_text,
+                colour=discord.Colour.from_rgb(255, 182, 193),
+            )
+        else:
+            embed = build_giveaway_ended_embed(guild_name, gw["prize"], "No valid entries", f"<@{gw['host_id']}>", image_url=img_url)
+            announcement_embed = discord.Embed(
+                description=f"{EMOJI_CONFUSE} Nobody entered the giveaway for **{gw['prize']}** {EMOJI_MUTHAL}.",
+                colour=discord.Colour.dark_grey(),
+            )
+            winners_mentions = None
+
+        if msg:
+            try:
+                await msg.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+
+        if winners_mentions:
+            content_text = f"{EMOJI_PARTY_CAT} CONGRATS {winners_mentions} YOU WON GIVEAWAY BY <@{gw['host_id']}> {EMOJI_FEATHER}"
+            await channel.send(content=content_text, embed=announcement_embed)
+        else:
+            await channel.send(embed=announcement_embed)
+
+    # ─────────────────────────────────────────── Reaction Listeners (React on YOGI JI to Enter)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        if payload.user_id == self.bot.user.id or payload.guild_id is None:
+            return
+        gw = await self.service.get_giveaway(payload.message_id)
+        if not gw or gw.get("ended"):
+            return
+
+        # Check if reaction is chadyogi or standard reaction
+        if payload.emoji.id == 1569432959512223815 or str(payload.emoji) in ("🎉", "🎁"):
+            await self.service.add_entry(payload.message_id, payload.user_id)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        if payload.user_id == self.bot.user.id or payload.guild_id is None:
+            return
+        gw = await self.service.get_giveaway(payload.message_id)
+        if not gw or gw.get("ended"):
+            return
+
+        if payload.emoji.id == 1569432959512223815 or str(payload.emoji) in ("🎉", "🎁"):
+            await self.service.remove_entry(payload.message_id, payload.user_id)
+
+    # ─────────────────────────────────────────── Slash Commands
+
+    @giveaway_slash.command(name="start", description="Start a giveaway with the custom server template")
+    @app_commands.describe(
+        duration="Duration of the giveaway (e.g. 30s, 10m, 2h, 1d)",
+        prize="What is being given away",
+        winners="Number of winners to draw (default: 1)",
+        image="Direct URL to an image or GIF banner",
+        attachment="Upload an image or GIF file directly",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def slash_start(
+        self,
+        interaction: discord.Interaction,
+        duration: str,
+        prize: str,
+        winners: app_commands.Range[int, 1, 50] = 1,
+        image: Optional[str] = None,
+        attachment: Optional[discord.Attachment] = None,
+    ) -> None:
+        seconds = parse_duration(duration)
+        if not seconds or seconds < 5:
+            await interaction.response.send_message("❌ Invalid duration! Use formats like `30s`, `10m`, `2h`, or `1d`.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        end_timestamp = int(discord.utils.utcnow().timestamp() + seconds)
+        guild_name = interaction.guild.name if interaction.guild else "SERVER"
+
+        # Fall back to guild default image if none provided
+        default_img = await self.service.get_default_image(interaction.guild_id) if interaction.guild_id else None
+
+        if attachment:
+            # Download and re-upload file directly onto the giveaway message
+            file_bytes = await attachment.read()
+            filename = attachment.filename
+            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+            embed = build_giveaway_embed(
+                guild_name, prize, winners, interaction.user.mention, end_timestamp, image_url=f"attachment://{filename}"
+            )
+            gw_message = await interaction.channel.send(embed=embed, file=file)
+            stored_url = f"attachment://{filename}"
+        elif image:
+            embed = build_giveaway_embed(
+                guild_name, prize, winners, interaction.user.mention, end_timestamp, image_url=image
+            )
+            gw_message = await interaction.channel.send(embed=embed)
+            stored_url = image
+        elif default_img:
+            embed = build_giveaway_embed(
+                guild_name, prize, winners, interaction.user.mention, end_timestamp, image_url=default_img
+            )
+            gw_message = await interaction.channel.send(embed=embed)
+            stored_url = default_img
+        else:
+            embed = build_giveaway_embed(
+                guild_name, prize, winners, interaction.user.mention, end_timestamp
+            )
+            gw_message = await interaction.channel.send(embed=embed)
+            stored_url = None
+
+        # Add chadyogi reaction directly to message
+        try:
+            await gw_message.add_reaction("<:chadyogi:1569432959512223815>")
+        except discord.HTTPException:
+            pass
+
+        await self.service.create_giveaway(
+            gw_message.id,
+            interaction.channel_id,
+            interaction.guild_id,
+            interaction.user.id,
+            prize,
+            seconds,
+            winners,
+            image_url=stored_url,
+        )
+        await interaction.followup.send(f"✅ Giveaway created! [View Message]({gw_message.jump_url})", ephemeral=True)
+
+    @giveaway_slash.command(name="setimage", description="Set default giveaway image for all future giveaways")
+    @app_commands.describe(
+        image="Direct URL to an image or GIF banner",
+        attachment="Upload an image or GIF file directly",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def slash_setimage(
+        self,
+        interaction: discord.Interaction,
+        image: Optional[str] = None,
+        attachment: Optional[discord.Attachment] = None,
+    ) -> None:
+        if not image and not attachment:
+            await interaction.response.send_message("❌ Please provide an image URL or upload an image attachment.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Resolve image — for URLs we can save directly; for attachments we need a permanent URL
+        if attachment:
+            resolved_url = attachment.url
+        else:
+            resolved_url = image
+
+        # Save as guild default for all future giveaways
+        await self.service.set_default_image(interaction.guild_id, resolved_url)
+
+        # Also update active giveaway in this channel if one exists
+        gw = await self.service.get_latest_active_in_channel(interaction.channel_id)
+        if gw:
+            channel = self.bot.get_channel(gw["channel_id"])
+            if channel:
+                try:
+                    msg = await channel.fetch_message(gw["message_id"])
+                    if msg.embeds:
+                        embed = msg.embeds[0]
+                        if attachment:
+                            file_bytes = await attachment.read()
+                            filename = attachment.filename
+                            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+                            embed.set_image(url=f"attachment://{filename}")
+                            await msg.edit(embed=embed, attachments=[file])
+                        else:
+                            embed.set_image(url=image)
+                            await msg.edit(embed=embed)
+                        await self.service.update_image(gw["message_id"], resolved_url)
+                except discord.HTTPException:
+                    pass
+
+            await interaction.followup.send("✅ Default giveaway image saved & updated on active giveaway!", ephemeral=True)
+        else:
+            await interaction.followup.send("✅ Default giveaway image saved! All future giveaways will use this image.", ephemeral=True)
+
+    @giveaway_slash.command(name="end", description="Immediately end a giveaway and pick winners")
+    @app_commands.describe(message_id="The message ID of the giveaway")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def slash_end(self, interaction: discord.Interaction, message_id: str) -> None:
+        if not message_id.isdigit():
+            await interaction.response.send_message("❌ Please provide a valid numerical message ID.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        mid = int(message_id)
+        gw = await self.service.get_giveaway(mid)
+        if not gw:
+            await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
+            return
+        if gw["ended"]:
+            await interaction.followup.send("❌ That giveaway has already ended.", ephemeral=True)
+            return
+
+        await self._finalize_giveaway(mid)
+        await interaction.followup.send("✅ Giveaway ended early successfully!", ephemeral=True)
+
+    @giveaway_slash.command(name="reroll", description="Pick new winner(s) for an ended giveaway")
+    @app_commands.describe(
+        message_id="The message ID of the ended giveaway",
+        winners="Number of new winners to draw (default: 1)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def slash_reroll(
+        self,
+        interaction: discord.Interaction,
+        message_id: str,
+        winners: app_commands.Range[int, 1, 20] = 1,
+    ) -> None:
+        if not message_id.isdigit():
+            await interaction.response.send_message("❌ Please provide a valid numerical message ID.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        mid = int(message_id)
+        res = await self.service.reroll(mid, winners)
+        if not res:
+            await interaction.followup.send("❌ Giveaway not found.", ephemeral=True)
+            return
+
+        gw, new_winners = res
+        if not new_winners:
+            await interaction.followup.send("❌ No valid entries to pick a new winner from.", ephemeral=True)
+            return
+
+        winners_mentions = ", ".join(f"<@{uid}>" for uid in new_winners)
+        channel = self.bot.get_channel(gw["channel_id"])
+        if channel:
+            announcement_text = self.get_winner_announcement(
+                channel.guild.id,
+                users=winners_mentions,
+                prize=gw["prize"],
+                host=f"<@{gw['host_id']}>",
+            )
+            announcement_embed = discord.Embed(
+                title="🎉 Giveaway Reroll",
+                description=announcement_text,
+                colour=discord.Colour.from_rgb(255, 182, 193),
+            )
+            content_text = f"{EMOJI_PARTY_CAT} CONGRATS {winners_mentions} YOU WON GIVEAWAY BY <@{gw['host_id']}> {EMOJI_FEATHER}"
+            await channel.send(content=content_text, embed=announcement_embed)
+        await interaction.followup.send(f"✅ Rerolled {len(new_winners)} new winner(s)!", ephemeral=True)
+
+    # ─────────────────────────────────────────── Prefix Commands
+
+    @commands.group(name="giveaway", invoke_without_command=True)
+    @commands.has_permissions(manage_guild=True)
+    async def prefix_giveaway(self, ctx: commands.Context) -> None:
+        await ctx.send(
+            "**Giveaway Commands:**\n"
+            "• `-gstart <duration> <prize> [winners]` — Start a giveaway (e.g. `-gstart 10m Nitro 1`)\n"
+            "• `-gimage <image_url>` or attach a file — Set default image for all giveaways\n"
+            "• `-gend <message_id>` — End giveaway early\n"
+            "• `-greroll <message_id> [winners]` — Pick new winner"
+        )
+
+    @commands.command(name="gstart")
+    @commands.has_permissions(manage_guild=True)
+    async def prefix_gstart(self, ctx: commands.Context, duration: str, *, rest_text: str) -> None:
+        seconds = parse_duration(duration)
+        if not seconds or seconds < 5:
+            await ctx.send("❌ Invalid duration! Use formats like `30s`, `10m`, `2h`, or `1d`.")
+            return
+
+        has_attachment = bool(ctx.message.attachments)
+        tokens = rest_text.strip().split()
+        if not tokens:
+            await ctx.send("❌ Please provide a prize! Example: `-gstart 10m Nitro 1`")
+            return
+
+        # Check if the last token is an image URL
+        resolved_image = None
+        if not has_attachment and (tokens[-1].startswith("http://") or tokens[-1].startswith("https://")):
+            resolved_image = tokens.pop()
+
+        # Check if the remaining last token or first token is winners (number)
+        winners = 1
+        if tokens and tokens[-1].isdigit():
+            winners = max(1, min(50, int(tokens.pop())))
+        elif tokens and tokens[0].isdigit():
+            winners = max(1, min(50, int(tokens.pop(0))))
+
+        prize = " ".join(tokens)
+        if not prize:
+            await ctx.send("❌ Please specify what you are giving away!")
+            return
+
+        # Fall back to guild default image if none provided
+        if not has_attachment and not resolved_image:
+            default_img = await self.service.get_default_image(ctx.guild.id)
+            if default_img:
+                resolved_image = default_img
+
+        end_timestamp = int(discord.utils.utcnow().timestamp() + seconds)
+        guild_name = ctx.guild.name if ctx.guild else "SERVER"
+
+        embed = build_giveaway_embed(
+            guild_name, prize, winners, ctx.author.mention, end_timestamp, image_url=resolved_image
+        )
+
+        if has_attachment:
+            # Re-upload the file directly attached to the giveaway message
+            att = ctx.message.attachments[0]
+            file_bytes = await att.read()
+            filename = att.filename
+            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+            embed.set_image(url=f"attachment://{filename}")
+            gw_message = await ctx.send(embed=embed, file=file)
+            stored_url = f"attachment://{filename}"
+        else:
+            gw_message = await ctx.send(embed=embed)
+            stored_url = resolved_image
+
+        # Add chadyogi reaction
+        try:
+            await gw_message.add_reaction("<:chadyogi:1569432959512223815>")
+        except discord.HTTPException:
+            pass
+
+        await self.service.create_giveaway(
+            gw_message.id,
+            ctx.channel.id,
+            ctx.guild.id,
+            ctx.author.id,
+            prize,
+            seconds,
+            winners,
+            image_url=stored_url,
+        )
+
+    @commands.command(name="gimage", aliases=["gsetimage"])
+    @commands.has_permissions(manage_guild=True)
+    async def prefix_gimage(self, ctx: commands.Context, *, image_url: Optional[str] = None) -> None:
+        has_attachment = bool(ctx.message.attachments)
+        if not has_attachment and not image_url:
+            await ctx.send("❌ Please provide an image URL or attach an image/GIF file.\nUsage: `-gimage <url>` or attach a file.")
+            return
+
+        # Resolve the URL to save as default
+        if has_attachment:
+            resolved_url = ctx.message.attachments[0].url
+        else:
+            resolved_url = image_url
+
+        # Save as guild default for all future giveaways
+        await self.service.set_default_image(ctx.guild.id, resolved_url)
+
+        # Also update active giveaway in this channel if one exists
+        gw = await self.service.get_latest_active_in_channel(ctx.channel.id)
+        if gw:
+            channel = self.bot.get_channel(gw["channel_id"])
+            if channel:
+                try:
+                    msg = await channel.fetch_message(gw["message_id"])
+                    if msg.embeds:
+                        embed = msg.embeds[0]
+                        if has_attachment:
+                            att = ctx.message.attachments[0]
+                            file_bytes = await att.read()
+                            filename = att.filename
+                            file = discord.File(io.BytesIO(file_bytes), filename=filename)
+                            embed.set_image(url=f"attachment://{filename}")
+                            await msg.edit(embed=embed, attachments=[file])
+                        else:
+                            embed.set_image(url=image_url)
+                            await msg.edit(embed=embed)
+                        await self.service.update_image(gw["message_id"], resolved_url)
+                except discord.HTTPException:
+                    pass
+
+            await ctx.send("✅ Default giveaway image saved & updated on active giveaway!")
+        else:
+            await ctx.send("✅ Default giveaway image saved! All future giveaways will use this image.")
+
+    @commands.command(name="gend")
+    @commands.has_permissions(manage_guild=True)
+    async def prefix_gend(self, ctx: commands.Context, message_id: int) -> None:
+        gw = await self.service.get_giveaway(message_id)
+        if not gw:
+            await ctx.send("❌ Giveaway not found.")
+            return
+        if gw["ended"]:
+            await ctx.send("❌ That giveaway has already ended.")
+            return
+
+        await self._finalize_giveaway(message_id)
+        await ctx.send("✅ Giveaway ended early successfully!")
+
+    @commands.command(name="greroll")
+    @commands.has_permissions(manage_guild=True)
+    async def prefix_greroll(self, ctx: commands.Context, message_id: int, winners: int = 1) -> None:
+        res = await self.service.reroll(message_id, winners)
+        if not res:
+            await ctx.send("❌ Giveaway not found.")
+            return
+
+        gw, new_winners = res
+        if not new_winners:
+            await ctx.send("❌ No valid entries to pick a new winner from.")
+            return
+
+        winners_mentions = ", ".join(f"<@{uid}>" for uid in new_winners)
+        channel = self.bot.get_channel(gw["channel_id"])
+        if channel:
+            announcement_text = self.get_winner_announcement(
+                channel.guild.id,
+                users=winners_mentions,
+                prize=gw["prize"],
+                host=f"<@{gw['host_id']}>",
+            )
+            announcement_embed = discord.Embed(
+                title="🎉 Giveaway Reroll",
+                description=announcement_text,
+                colour=discord.Colour.from_rgb(255, 182, 193),
+            )
+            content_text = f"{EMOJI_PARTY_CAT} CONGRATS {winners_mentions} YOU WON GIVEAWAY BY <@{gw['host_id']}> {EMOJI_FEATHER}"
+            await channel.send(content=content_text, embed=announcement_embed)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(GiveawayCog(bot))
 
