@@ -1,1 +1,233 @@
+import logging
+import random
+import re
+import time
+from typing import Any, List, Optional, Tuple
+
+import discord
+
+log = logging.getLogger("discord.bot.giveaway.service")
+
+
+def parse_duration(time_str: str) -> Optional[int]:
+    """Parse time strings like '30s', '10m', '2h', '1d', '7d' into total seconds."""
+    time_str = time_str.strip().lower()
+    match = re.match(r"^(\d+)([smhd])$", time_str)
+    if not match:
+        # If pure integer passed, treat as seconds or minutes
+        if time_str.isdigit():
+            return int(time_str) * 60  # default minutes
+        return None
+
+    val = int(match.group(1))
+    unit = match.group(2)
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    return val * multipliers[unit]
+
+
+class GiveawayService:
+    """Backend service for giveaway data, timers, entries, and winner draws."""
+
+    def __init__(self, bot: Any) -> None:
+        self.bot = bot
+
+    async def init_db(self) -> None:
+        """Create giveaways and entries tables."""
+        await self.bot.db.execute(
+            """CREATE TABLE IF NOT EXISTS giveaways (
+                message_id    INTEGER PRIMARY KEY,
+                channel_id    INTEGER NOT NULL,
+                guild_id      INTEGER NOT NULL,
+                host_id       INTEGER NOT NULL,
+                prize         TEXT NOT NULL,
+                winners_count INTEGER NOT NULL DEFAULT 1,
+                end_time      REAL NOT NULL,
+                ended         INTEGER NOT NULL DEFAULT 0,
+                image_url     TEXT
+            )"""
+        )
+        try:
+            await self.bot.db.execute("ALTER TABLE giveaways ADD COLUMN image_url TEXT")
+        except Exception:
+            pass
+
+        await self.bot.db.execute(
+            """CREATE TABLE IF NOT EXISTS giveaway_settings (
+                guild_id      INTEGER PRIMARY KEY,
+                default_image TEXT
+            )"""
+        )
+
+        await self.bot.db.execute(
+            """CREATE TABLE IF NOT EXISTS giveaway_entries (
+                message_id INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                PRIMARY KEY (message_id, user_id)
+            )"""
+        )
+        log.info("GiveawayService tables initialized")
+
+    async def create_giveaway(
+        self,
+        message_id: int,
+        channel_id: int,
+        guild_id: int,
+        host_id: int,
+        prize: str,
+        duration_seconds: int,
+        winners_count: int,
+        image_url: Optional[str] = None,
+    ) -> float:
+        end_time = time.time() + duration_seconds
+        await self.bot.db.execute(
+            """INSERT INTO giveaways (message_id, channel_id, guild_id, host_id, prize, winners_count, end_time, ended, image_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+            (message_id, channel_id, guild_id, host_id, prize, winners_count, end_time, image_url),
+        )
+        return end_time
+
+    async def update_image(self, message_id: int, image_url: str) -> bool:
+        """Update or add an image/GIF URL to an existing giveaway."""
+        await self.bot.db.execute(
+            "UPDATE giveaways SET image_url = ? WHERE message_id = ?",
+            (image_url, message_id),
+        )
+        return True
+
+    async def set_default_image(self, guild_id: int, image_url: str) -> None:
+        """Set the default giveaway image for a guild."""
+        await self.bot.db.execute(
+            "INSERT INTO giveaway_settings (guild_id, default_image) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET default_image = ?",
+            (guild_id, image_url, image_url),
+        )
+        await self.bot.cache.set(f"gw:default_image:{guild_id}", image_url, ttl=86400)
+
+    async def get_default_image(self, guild_id: int) -> Optional[str]:
+        """Get the default giveaway image for a guild (Redis Cache-Aside)."""
+        cached = await self.bot.cache.get(f"gw:default_image:{guild_id}")
+        if cached:
+            return cached
+        row = await self.bot.db.fetchone(
+            "SELECT default_image FROM giveaway_settings WHERE guild_id = ?",
+            (guild_id,),
+        )
+        if row and row["default_image"]:
+            await self.bot.cache.set(f"gw:default_image:{guild_id}", row["default_image"], ttl=86400)
+            return row["default_image"]
+        return None
+
+    async def add_entry(self, message_id: int, user_id: int) -> bool:
+        """Register a user into giveaway entries (Write-Through Redis + SQLite)."""
+        await self.bot.cache.set(f"gw:entry:{message_id}:{user_id}", 1, ttl=86400)
+        await self.bot.db.execute(
+            "INSERT OR IGNORE INTO giveaway_entries (message_id, user_id) VALUES (?, ?)",
+            (message_id, user_id),
+        )
+        return True
+
+    async def remove_entry(self, message_id: int, user_id: int) -> bool:
+        """Remove a user from giveaway entries (Write-Through Redis + SQLite)."""
+        await self.bot.cache.delete(f"gw:entry:{message_id}:{user_id}")
+        await self.bot.db.execute(
+            "DELETE FROM giveaway_entries WHERE message_id = ? AND user_id = ?",
+            (message_id, user_id),
+        )
+        return True
+
+    async def toggle_entry(self, message_id: int, user_id: int) -> Tuple[bool, int]:
+        """Toggles user participation in a giveaway. Returns (is_now_entered, total_entries)."""
+        cache_key = f"gw:entry:{message_id}:{user_id}"
+        cached = await self.bot.cache.get(cache_key)
+        if cached is not None:
+            is_entered = bool(cached)
+        else:
+            existing = await self.bot.db.fetchone(
+                "SELECT user_id FROM giveaway_entries WHERE message_id = ? AND user_id = ?",
+                (message_id, user_id),
+            )
+            is_entered = bool(existing)
+
+        if is_entered:
+            await self.bot.db.execute(
+                "DELETE FROM giveaway_entries WHERE message_id = ? AND user_id = ?",
+                (message_id, user_id),
+            )
+            await self.bot.cache.delete(cache_key)
+            entered = False
+        else:
+            await self.bot.db.execute(
+                "INSERT INTO giveaway_entries (message_id, user_id) VALUES (?, ?)",
+                (message_id, user_id),
+            )
+            await self.bot.cache.set(cache_key, 1, ttl=86400)
+            entered = True
+
+        total_row = await self.bot.db.fetchone(
+            "SELECT COUNT(*) as count FROM giveaway_entries WHERE message_id = ?",
+            (message_id,),
+        )
+        total = total_row["count"] if total_row else 0
+        return entered, total
+
+    async def get_giveaway(self, message_id: int) -> Optional[dict[str, Any]]:
+        cached = await self.bot.cache.get(f"gw:info:{message_id}")
+        if cached:
+            return cached
+        row = await self.bot.db.fetchone("SELECT * FROM giveaways WHERE message_id = ?", (message_id,))
+        if row:
+            data = dict(row)
+            await self.bot.cache.set(f"gw:info:{message_id}", data, ttl=300)
+            return data
+        return None
+
+    async def get_entries(self, message_id: int) -> List[int]:
+        rows = await self.bot.db.fetchall(
+            "SELECT user_id FROM giveaway_entries WHERE message_id = ?", (message_id,)
+        )
+        return [r["user_id"] for r in rows]
+
+    async def end_giveaway(self, message_id: int) -> Optional[Tuple[dict[str, Any], List[int]]]:
+        gw = await self.get_giveaway(message_id)
+        if not gw or gw["ended"]:
+            return None
+
+        await self.bot.db.execute(
+            "UPDATE giveaways SET ended = 1 WHERE message_id = ?", (message_id,)
+        )
+        await self.bot.cache.delete(f"gw:info:{message_id}")
+        gw["ended"] = 1
+
+        entries = await self.get_entries(message_id)
+        winners_count = min(gw["winners_count"], len(entries))
+        winners = random.sample(entries, winners_count) if winners_count > 0 else []
+        return gw, winners
+
+    async def reroll(self, message_id: int, count: int = 1) -> Optional[Tuple[dict[str, Any], List[int]]]:
+        gw = await self.get_giveaway(message_id)
+        if not gw:
+            return None
+
+        entries = await self.get_entries(message_id)
+        if not entries:
+            return gw, []
+
+        count = min(count, len(entries))
+        winners = random.sample(entries, count)
+        return gw, winners
+
+    async def get_latest_active_in_channel(self, channel_id: int) -> Optional[dict[str, Any]]:
+        """Get the most recent active (not ended) giveaway in a channel."""
+        row = await self.bot.db.fetchone(
+            "SELECT * FROM giveaways WHERE channel_id = ? AND ended = 0 ORDER BY end_time DESC LIMIT 1",
+            (channel_id,),
+        )
+        return dict(row) if row else None
+
+    async def get_due_giveaways(self) -> List[dict[str, Any]]:
+        now = time.time()
+        rows = await self.bot.db.fetchall(
+            "SELECT * FROM giveaways WHERE end_time <= ? AND ended = 0", (now,)
+        )
+        return [dict(r) for r in rows]
 
